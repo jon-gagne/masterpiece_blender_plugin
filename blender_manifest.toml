@@ -1,0 +1,47 @@
+schema_version = "1.0.0"
+
+id = "masterpiece_x_generator"
+version = "1.0.0"
+name = "Masterpiece X Generator"
+tagline = "Generate 3D models from text using Masterpiece X's GenAI API"
+maintainer = "Your Name <gagne.jonathan@gmail.com>"
+type = "add-on"
+
+# Minimum supported Blender version
+blender_version_min = "4.2.0"
+
+# License
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+copyright = [
+  "2025 Jonathan Gagne",
+]
+
+# Tags that describe your add-on
+tags = ["Modeling", "Import-Export", "Object"]
+
+# Python wheels for dependencies
+wheels = [
+  "./wheels/mpx_genai_sdk-0.7.0-py3-none-any.whl",
+  "./wheels/requests-2.32.3-py3-none-any.whl",
+  "./wheels/anyio-4.9.0-py3-none-any.whl",
+  "./wheels/certifi-2025.1.31-py3-none-any.whl",
+  "./wheels/charset_normalizer-3.4.1-cp311-cp311-win_amd64.whl",
+  "./wheels/distro-1.9.0-py3-none-any.whl",
+  "./wheels/h11-0.14.0-py3-none-any.whl",
+  "./wheels/httpcore-1.0.7-py3-none-any.whl",
+  "./wheels/httpx-0.28.1-py3-none-any.whl",
+  "./wheels/idna-3.10-py3-none-any.whl",
+  "./wheels/pydantic-2.10.6-py3-none-any.whl",
+  "./wheels/pydantic_core-2.27.2-cp311-cp311-win_amd64.whl",
+  "./wheels/sniffio-1.3.1-py3-none-any.whl",
+  "./wheels/typing_extensions-4.12.2-py3-none-any.whl",
+  "./wheels/urllib3-2.3.0-py3-none-any.whl",
+  "./wheels/annotated_types-0.7.0-py3-none-any.whl"
+]
+
+# Permissions needed by the add-on
+[permissions]
+network = "Connect to Masterpiece X API for 3D model generation"
+files = "Import generated 3D models and save temporary files" 
