@@ -7,7 +7,7 @@ bl_info = {
     "name": "Masterpiece X Generator",
     "author": "Jonathan Gagne",
     "version": (1, 0, 0),
-    "blender": (4, 2, 0),
+    "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Masterpiece X",
     "description": "Generate 3D models using Masterpiece X's GenAI API",
     "warning": "",
@@ -19,8 +19,9 @@ import bpy
 from bpy.props import StringProperty
 from bpy.types import AddonPreferences
 import importlib
+import os
 
-# Import addon modules
+# Import addon modules with direct imports - Blender's extension build uses a flat structure
 from . import operators
 from . import panels
 
@@ -37,7 +38,7 @@ def reload_modules():
 
 class MasterpieceXPreferences(AddonPreferences):
     """Addon preferences for storing API key"""
-    bl_idname = __name__
+    bl_idname = "bl_ext.user_default.masterpiece_x_generator"  # Full module path for Blender 4.3 extensions
 
     api_key: StringProperty(
         name="API Key",
@@ -49,7 +50,10 @@ class MasterpieceXPreferences(AddonPreferences):
     def draw(self, context):
         """Draw the preferences panel"""
         layout = self.layout
+        layout.label(text="Masterpiece X API Key")
         layout.prop(self, "api_key")
+        layout.label(text="Get your API key from Masterpiece X website")
+        layout.operator("wm.url_open", text="Visit Masterpiece X", icon='URL').url = "https://www.masterpiecex.com/"
 
 classes = (
     MasterpieceXPreferences,
@@ -66,12 +70,17 @@ def register():
     # Register preferences class
     for cls in classes:
         try:
-            # Check if the class is already registered
+            # First try to unregister if it's already registered to prevent double registration
             if hasattr(bpy.types, cls.__name__):
-                print(f"Class {cls.__name__} is already registered, skipping.")
-                continue
+                try:
+                    bpy.utils.unregister_class(cls)
+                    print(f"Unregistered existing {cls.__name__} before re-registration")
+                except:
+                    pass
                 
+            # Now register the class
             bpy.utils.register_class(cls)
+            print(f"Successfully registered {cls.__name__}")
         except Exception as e:
             print(f"Could not register {cls.__name__}: {e}")
     
@@ -88,7 +97,34 @@ def register():
 
 def unregister():
     """Unregister the addon and its classes"""
-    # Unregister operators and panels
+    # First perform critical cleanup before any unregistration
+    try:
+        print("Cleaning up resources...")
+        from . import operators
+        operators.cleanup_resources()
+        
+        # Import necessary modules for cleanup
+        import sys
+        import gc
+    except Exception as e:
+        print(f"Error importing modules for cleanup: {e}")
+    
+    # Clear any environment variables set by the addon
+    try:
+        if "MPX_SDK_BEARER_TOKEN" in os.environ:
+            del os.environ["MPX_SDK_BEARER_TOKEN"]
+    except Exception as e:
+        print(f"Error clearing environment variables: {e}")
+            
+    # Clear any Blender data created by the addon
+    try:
+        # Clear any preview images
+        if "MPX_Preview_Image" in bpy.data.images:
+            bpy.data.images.remove(bpy.data.images["MPX_Preview_Image"])
+    except Exception as e:
+        print(f"Error clearing Blender data: {e}")
+        
+    # Unregister operators and panels with proper exception handling
     try:
         operators.unregister()
     except Exception as e:
@@ -106,6 +142,29 @@ def unregister():
                 bpy.utils.unregister_class(cls)
         except Exception as e:
             print(f"Could not unregister {cls.__name__}: {e}")
+    
+    # Reference cleanup for better unloading
+    try:
+        # Force multiple garbage collection passes
+        print("Running garbage collection to release module references...")
+        for _ in range(3):
+            gc.collect()
+        
+        # Clear module references
+        modules_to_clear = ["operators", "panels"]
+        for module_name in modules_to_clear:
+            if module_name in globals():
+                globals()[module_name] = None
+        
+        # Run garbage collection again after clearing references
+        gc.collect()
+    except Exception as e:
+        print(f"Error in reference cleanup: {e}")
+        
+    print("Masterpiece X Generator unregistered successfully")
+    
+    # For debugging - print warning about waiting for shutdown
+    print("Note: Some files may only be fully released when Blender is closed")
 
 if __name__ == "__main__":
     register() 

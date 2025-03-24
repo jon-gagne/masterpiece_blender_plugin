@@ -25,6 +25,7 @@ from bpy.props import StringProperty, BoolProperty, EnumProperty, IntProperty, F
 from pathlib import Path
 from io import BytesIO
 import threading
+import re
 
 # Try to import the required modules - these should be available from wheels
 try:
@@ -53,6 +54,109 @@ generation_status = {
     "start_time": 0,           # When generation started
     "active_threads": []       # Track active background threads
 }
+
+def cleanup_resources():
+    """Clean up any resources used by the addon"""
+    global generation_status
+    
+    # Stop any active generations
+    generation_status["active"] = False
+    
+    # Clean up any temporary files
+    try:
+        if generation_status.get("model_path") and os.path.exists(generation_status["model_path"]):
+            try:
+                os.remove(generation_status["model_path"])
+            except:
+                pass
+        
+        if generation_status.get("image_path") and os.path.exists(generation_status["image_path"]):
+            try:
+                os.remove(generation_status["image_path"])
+            except:
+                pass
+    except:
+        pass
+    
+    # Clear API client to prevent it from holding references
+    generation_status["client"] = None
+        
+    # Reset all request IDs
+    generation_status["image_request_id"] = None
+    generation_status["model_request_id"] = None
+    generation_status["asset_request_id"] = None
+    
+    # Clear URLs
+    generation_status["image_url"] = None
+    generation_status["model_url"] = None
+    
+    # Clear paths
+    generation_status["image_path"] = None
+    generation_status["model_path"] = None
+    
+    # Ensure threads are properly handled
+    for thread in generation_status.get("active_threads", []):
+        # We can't forcibly terminate threads, but we can ensure they're marked as daemon
+        # so they'll exit when Blender does
+        if thread and hasattr(thread, "daemon"):
+            thread.daemon = True
+    
+    # Clear thread list
+    generation_status["active_threads"] = []
+    
+    # Try to remove timers if any are active
+    try:
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    for region in area.regions:
+                        if region.type == 'WINDOW':
+                            override = {'window': window, 'screen': window.screen, 'area': area, 'region': region}
+                            try:
+                                # Try to cancel any active poll operation
+                                bpy.ops.mpxgen.poll_status('CANCEL', override)
+                                bpy.ops.mpxgen.download_model('CANCEL', override)
+                            except:
+                                pass
+    except:
+        pass
+        
+    # Explicitly unload any imported external modules to release DLL files
+    try:
+        modules_to_unload = []
+        
+        # Find all modules related to our dependencies
+        for module_name in list(sys.modules.keys()):
+            if any(module_name.startswith(prefix) for prefix in [
+                'charset_normalizer', 
+                'pydantic', 
+                'mpx_genai_sdk', 
+                'requests', 
+                'urllib3',
+                'httpx',
+                'idna',
+                'certifi',
+                'anyio',
+                'httpcore',
+                'sniffio',
+                'distro',
+                'h11',
+                'typing_extensions',
+                'annotated_types'
+            ]):
+                modules_to_unload.append(module_name)
+                
+        # Remove modules from sys.modules
+        for module_name in modules_to_unload:
+            if module_name in sys.modules:
+                try:
+                    # Set to None first to help with reference counting
+                    sys.modules[module_name] = None
+                    del sys.modules[module_name]
+                except:
+                    pass
+    except:
+        pass
 
 def force_ui_update():
     """
@@ -226,7 +330,10 @@ class MPXGEN_OT_PollStatus(bpy.types.Operator):
                 minutes = elapsed_time // 60
                 seconds = elapsed_time % 60
                 time_str = f"{minutes}m {seconds}s"
-                generation_status["status_text"] = f"Generating... ({time_str})"
+                
+                # Keep the current status text but add the elapsed time
+                if "Generating" in generation_status["status_text"]:
+                    generation_status["status_text"] = f"{generation_status['status_text'].split('(')[0]} ({time_str})"
                 
                 # Process according to current step
                 try:
@@ -266,6 +373,31 @@ class MPXGEN_OT_PollStatus(bpy.types.Operator):
         """Check status of the image-to-3D generation"""
         try:
             status_response = client.status.retrieve(generation_status["model_request_id"])
+            
+            # Update progress based on API response if available
+            if hasattr(status_response, 'progress') and status_response.progress is not None:
+                # Scale progress from the API (0-1) to our range based on where we are in the workflow
+                try:
+                    # Log original progress value for debugging
+                    print(f"API progress value: {status_response.progress} (type: {type(status_response.progress)})")
+                    
+                    if generation_status["asset_request_id"] and not generation_status["image_request_id"]:
+                        # Direct image-to-3D workflow (45-80% of our progress bar)
+                        api_progress = min(1.0, float(status_response.progress))  # Ensure it's between 0 and 1
+                        generation_status["progress"] = min(80, 45 + int(api_progress * 35))
+                    else:
+                        # Text-to-image-to-3D workflow (60-80% of our progress bar)
+                        api_progress = min(1.0, float(status_response.progress))  # Ensure it's between 0 and 1
+                        generation_status["progress"] = min(80, 60 + int(api_progress * 20))
+                    
+                    print(f"Converted to progress: {generation_status['progress']}%")
+                except Exception as e:
+                    print(f"Error processing progress value: {e}")
+                    # Fall back to a safe default progress
+                    if generation_status["asset_request_id"] and not generation_status["image_request_id"]:
+                        generation_status["progress"] = 60  # Middle of direct image-to-3D progress range
+                    else:
+                        generation_status["progress"] = 70  # Middle of text-to-image-to-3D progress range
             
             if status_response.status == "complete":
                 generation_status["progress"] = 80
@@ -412,8 +544,11 @@ class MPXGEN_OT_ProcessImage(bpy.types.Operator):
             image_path = generation_status["image_path"]
             
             # Get API key from preferences
-            preferences = context.preferences.addons[__package__].preferences
-            api_key = preferences.api_key
+            preferences = context.preferences.addons.get("bl_ext.user_default.masterpiece_x_generator")
+            if preferences and preferences.preferences:
+                api_key = preferences.preferences.api_key
+            else:
+                raise RuntimeError("API key not found in preferences")
             
             # Create asset
             asset_response = client.assets.create(
@@ -658,19 +793,19 @@ class MPXGEN_OT_DownloadModel(bpy.types.Operator):
 
 class MPXGEN_OT_GenerateModel(bpy.types.Operator):
     """
-    Start the process of generating a 3D model from text
+    Start the process of generating a 3D model from text or image
     
     This operator initiates the model generation process by:
     1. Validating input parameters
     2. Setting up the generation environment
-    3. Starting the text-to-image request
+    3. Starting the text-to-image or image-to-3D request
     4. Launching the background polling process
     
     The actual generation happens asynchronously using the polling operator.
     """
     bl_idname = "mpxgen.generate_model"
     bl_label = "Generate Model"
-    bl_description = "Generate a 3D model from text prompt using Masterpiece X"
+    bl_description = "Generate a 3D model from text prompt or image using Masterpiece X"
     bl_options = {'REGISTER', 'INTERNAL'}
 
     # Input parameters
@@ -703,6 +838,18 @@ class MPXGEN_OT_GenerateModel(bpy.types.Operator):
         default=1,
         min=1
     )
+    
+    from_image: BoolProperty(
+        name="From Image",
+        description="Generate 3D model from an image instead of text",
+        default=False
+    )
+    
+    image_path: StringProperty(
+        name="Image Path",
+        description="Path to the image file to use for generation",
+        default=""
+    )
 
     def execute(self, context):
         """Set up and start the generation process"""
@@ -712,16 +859,23 @@ class MPXGEN_OT_GenerateModel(bpy.types.Operator):
             return {'CANCELLED'}
 
         # Verify API key is set
-        preferences = context.preferences.addons[__package__].preferences
-        api_key = preferences.api_key
-        if not api_key:
+        preferences = context.preferences.addons.get("bl_ext.user_default.masterpiece_x_generator")
+        if not preferences or not preferences.preferences or not preferences.preferences.api_key:
             self.report({'ERROR'}, "Please enter your Masterpiece X API key in the addon preferences")
             return {'CANCELLED'}
+        
+        api_key = preferences.preferences.api_key
 
-        # Verify prompt is not empty
-        if not self.prompt:
-            self.report({'ERROR'}, "Please enter a prompt to generate a model")
-            return {'CANCELLED'}
+        # Verify input parameters based on generation method
+        if self.from_image:
+            if not self.image_path or not os.path.exists(self.image_path):
+                self.report({'ERROR'}, "Please select a valid image file")
+                return {'CANCELLED'}
+        else:
+            # Text-based generation requires a prompt
+            if not self.prompt:
+                self.report({'ERROR'}, "Please enter a prompt to generate a model")
+                return {'CANCELLED'}
             
         # Check if generation is already in progress
         global generation_status
@@ -744,14 +898,33 @@ class MPXGEN_OT_GenerateModel(bpy.types.Operator):
             client = Masterpiecex()
             generation_status["client"] = client
             
-            # Start the text-to-image generation
-            generation_status["status_text"] = "Starting image generation..."
-            generation_status["progress"] = 10
-            generation_status["current_step"] = "image"
+            if self.from_image:
+                # Image-to-3D workflow
+                self._start_image_based_generation(context)
+            else:
+                # Text-to-image workflow
+                self._start_text_based_generation(context)
             
-            # Force UI update with new status
-            force_ui_update()
+            return {'FINISHED'}
             
+        except Exception as e:
+            # Handle initialization errors
+            self._handle_error(f"Error initiating generation: {e}")
+            return {'CANCELLED'}
+    
+    def _start_text_based_generation(self, context):
+        """Start text-to-image generation workflow"""
+        client = generation_status["client"]
+        
+        # Update status
+        generation_status["status_text"] = "Starting image generation..."
+        generation_status["progress"] = 10
+        generation_status["current_step"] = "image"
+        
+        # Force UI update with new status
+        force_ui_update()
+        
+        try:
             # Initiate text-to-image generation
             text_to_image_request = client.components.text2image(
                 prompt=self.prompt,
@@ -768,13 +941,136 @@ class MPXGEN_OT_GenerateModel(bpy.types.Operator):
             # Update UI and start the polling operator
             force_ui_update()
             bpy.ops.mpxgen.poll_status()
+        
+        except Exception as e:
+            raise RuntimeError(f"Failed to start text-to-image generation: {e}")
+    
+    def _start_image_based_generation(self, context):
+        """Start image-to-3D generation workflow"""
+        client = generation_status["client"]
+        
+        # Update status
+        generation_status["status_text"] = "Preparing to upload image..."
+        generation_status["progress"] = 10
+        
+        # Force UI update
+        force_ui_update()
+        
+        try:
+            # Get image filename and mime type
+            image_filename = os.path.basename(self.image_path)
+            mime_type = self._get_mime_type_from_extension(self.image_path)
             
-            return {'FINISHED'}
+            # Sanitize filename for API - Masterpiece X only allows alphanumeric, underscore and period
+            # First ensure the filename is lowercase
+            sanitized_filename = image_filename.lower()
+            # Replace any spaces with underscores
+            sanitized_filename = sanitized_filename.replace(' ', '_')
+            # Now filter out any non-alphanumeric, non-underscore, non-period characters
+            sanitized_filename = re.sub(r'[^a-z0-9_.]', '', sanitized_filename)
+            # Ensure filename is not empty and starts with a letter or number
+            if not sanitized_filename or not sanitized_filename[0].isalnum():
+                sanitized_filename = f"mpx_{int(time.time())}.{sanitized_filename.split('.')[-1]}"
+            
+            # Create asset for image upload
+            generation_status["status_text"] = "Creating asset for image upload..."
+            generation_status["progress"] = 15
+            force_ui_update()
+            
+            asset_response = client.assets.create(
+                description=f"Image uploaded from Blender: {image_filename}",
+                name=sanitized_filename,
+                type=mime_type,
+            )
+            
+            if not (hasattr(asset_response, 'asset_url') and 
+                    hasattr(asset_response, 'request_id')):
+                raise RuntimeError("Invalid asset response from API")
+                
+            generation_status["asset_request_id"] = asset_response.request_id
+            
+            # Upload the image
+            generation_status["status_text"] = "Uploading image..."
+            generation_status["progress"] = 25
+            force_ui_update()
+            
+            # Get API key from preferences
+            preferences = context.preferences.addons.get("bl_ext.user_default.masterpiece_x_generator")
+            if preferences and preferences.preferences:
+                api_key = preferences.preferences.api_key
+            else:
+                raise RuntimeError("API key not found in preferences")
+            
+            # Set headers for upload
+            headers = {
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type': mime_type,
+            }
+            
+            # Upload the image file
+            with open(self.image_path, 'rb') as image_file:
+                try:
+                    upload_response = requests.put(
+                        asset_response.asset_url, 
+                        data=image_file.read(), 
+                        headers=headers,
+                        timeout=60
+                    )
+                    
+                    if upload_response.status_code != 200:
+                        error_message = f"Failed to upload image: {upload_response.text}"
+                        if "Invalid asset name" in upload_response.text:
+                            error_message += " Please use an image with a simpler filename (letters, numbers, underscores only)."
+                        raise RuntimeError(error_message)
+                except requests.exceptions.RequestException as e:
+                    raise RuntimeError(f"Network error while uploading image: {str(e)}")
+            
+            # Start 3D model generation from the uploaded image
+            generation_status["status_text"] = "Starting 3D model generation..."
+            generation_status["progress"] = 40
+            force_ui_update()
+            
+            # Use the asset request ID to generate the 3D model
+            try:
+                imageto3d_request = client.functions.imageto3d(
+                    image_request_id=generation_status["asset_request_id"],
+                    seed=self.seed,
+                    texture_size=self.texture_size
+                )
+                
+                # Update status to move to model generation step
+                generation_status["model_request_id"] = imageto3d_request.request_id
+                generation_status["current_step"] = "model"
+                generation_status["status_text"] = "Generating 3D model from image..."
+                generation_status["progress"] = 45
+                
+                # Force UI update and start the polling operator
+                force_ui_update()
+                bpy.ops.mpxgen.poll_status()
+                
+            except Exception as e:
+                error_msg = str(e)
+                if "Invalid asset" in error_msg:
+                    raise RuntimeError(f"API rejected the image: {error_msg}. Try a different image or format.")
+                else:
+                    raise RuntimeError(f"Failed to start 3D model generation: {error_msg}")
             
         except Exception as e:
-            # Handle initialization errors
-            self._handle_error(f"Error initiating generation: {e}")
-            return {'CANCELLED'}
+            raise RuntimeError(f"Failed to process image: {e}")
+    
+    def _get_mime_type_from_extension(self, filepath):
+        """Determine MIME type from file extension"""
+        extension = os.path.splitext(filepath)[1].lower()
+        
+        mime_types = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.bmp': 'image/bmp',
+            '.webp': 'image/webp',
+        }
+        
+        return mime_types.get(extension, 'image/png')
     
     def _reset_generation_status(self):
         """Reset the global generation status dictionary"""
@@ -817,17 +1113,20 @@ classes = (
 )
 
 def register():
-    # Register classes, but check if they're already registered first
+    # Register classes, properly handling existing registrations
     for cls in classes:
         try:
-            # Check if the class is already registered
+            # First try to unregister if it's already registered
             if hasattr(bpy.types, cls.__name__):
-                # Skip registration for this class
-                print(f"Class {cls.__name__} is already registered, skipping.")
-                continue
+                try:
+                    bpy.utils.unregister_class(cls)
+                    print(f"Unregistered existing {cls.__name__} before re-registration")
+                except:
+                    pass
             
-            # Register the class
+            # Now register the class
             bpy.utils.register_class(cls)
+            print(f"Successfully registered {cls.__name__}")
         except Exception as e:
             print(f"Could not register {cls.__name__}: {str(e)}")
 
