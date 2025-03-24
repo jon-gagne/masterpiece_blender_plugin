@@ -1,3 +1,19 @@
+"""
+Operators for Masterpiece X Generator
+
+This module contains the core functionality for generating 3D models from text prompts.
+It handles the communication with the Masterpiece X API, the generation process,
+and the downloading and importing of the generated models.
+
+The generation process is split into multiple operators to make it non-blocking:
+1. MPXGEN_OT_GenerateModel - Starts the generation process
+2. MPXGEN_OT_PollStatus - Handles polling the API for status updates
+3. MPXGEN_OT_ProcessImage - Processes the generated image
+4. MPXGEN_OT_DownloadModel - Downloads and imports the model
+
+The InstallDependencies and CancelGeneration operators handle utility functions.
+"""
+
 import bpy
 import os
 import sys
@@ -18,73 +34,82 @@ try:
 except ImportError:
     MASTERPIECEX_INSTALLED = False
 
-# Global variables to track generation status
+# Global state dictionary to track generation progress
 generation_status = {
-    "active": False,
-    "status_text": "",
-    "progress": 0,
-    "current_step": "",
-    "error": "",
-    "client": None,
-    "image_request_id": None,
-    "image_url": None,
-    "image_path": None,
-    "model_request_id": None,
-    "model_url": None,
-    "model_path": None,
-    "asset_request_id": None,
-    "last_poll_time": 0,
-    "start_time": 0
+    "active": False,           # Whether generation is active
+    "status_text": "",         # Current status message
+    "progress": 0,             # Progress percentage (0-100)
+    "current_step": "",        # Current step in the process
+    "error": "",               # Error message if any
+    "client": None,            # Masterpiece X client instance
+    "image_request_id": None,  # ID of the text-to-image request
+    "image_url": None,         # URL of the generated image
+    "image_path": None,        # Local path to saved image
+    "model_request_id": None,  # ID of the image-to-3D request
+    "model_url": None,         # URL of the generated model
+    "model_path": None,        # Local path to saved model
+    "asset_request_id": None,  # ID of the asset upload
+    "last_poll_time": 0,       # Last time we checked status
+    "start_time": 0,           # When generation started
+    "active_threads": []       # Track active background threads
 }
 
-# Helper function to force UI updates across all Blender windows
 def force_ui_update():
-    # Update all View3D areas
+    """
+    Force Blender to update the UI in all 3D View areas.
+    
+    This ensures that status changes are immediately visible to the user
+    even when Blender is busy with other operations. It tries multiple
+    approaches to ensure at least one works.
+    """
+    # Primary method - update all View3D areas
     try:
         for window in bpy.context.window_manager.windows:
             for area in window.screen.areas:
                 if area.type == 'VIEW_3D':
-                    # Force the sidebar to be open
-                    try:
-                        for space in area.spaces:
-                            if space.type == 'VIEW_3D':
-                                # Make sure the sidebar is visible
-                                space.show_region_ui = True
-                    except:
-                        pass
+                    # Make sidebar visible
+                    for space in area.spaces:
+                        if space.type == 'VIEW_3D':
+                            space.show_region_ui = True
                     
-                    # Force redraw of all UI regions
+                    # Redraw UI and panels
                     for region in area.regions:
                         region.tag_redraw()
-                    
-                    # Tag the whole area
                     area.tag_redraw()
-    except:
-        # Fallback if the above fails
+    except Exception:
+        # Fallback method
         try:
             for area in bpy.context.screen.areas:
                 if area.type == 'VIEW_3D':
                     area.tag_redraw()
-        except:
+        except Exception:
             pass
             
-    # Try to force a redraw (safely)
+    # Force immediate redraw
     try:
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
-    except:
+    except Exception:
         pass
 
 
 class MPXGEN_OT_InstallDependencies(bpy.types.Operator):
-    """Check if required dependencies are available"""
+    """
+    Check if the Masterpiece X SDK and dependencies are properly installed
+    
+    This operator attempts to import the required modules and updates
+    the addon status accordingly. It serves as a dependency verification
+    tool rather than an actual installer since the dependencies are
+    included as wheels in the extension package.
+    """
     bl_idname = "mpxgen.install_dependencies"
     bl_label = "Check Dependencies"
-    bl_description = "Check if Masterpiece X dependencies are available"
+    bl_description = "Check if Masterpiece X dependencies are properly installed"
     bl_options = {'REGISTER', 'INTERNAL'}
 
     def execute(self, context):
-        # Try importing the modules again
+        """Try to import required modules and update status"""
         try:
+            # Refresh the module cache
             import importlib
             importlib.invalidate_caches()
             
@@ -92,44 +117,77 @@ class MPXGEN_OT_InstallDependencies(bpy.types.Operator):
             from mpx_genai_sdk import Masterpiecex
             import requests
             
-            # Update the global flag
+            # Update the global flag if successful
             global MASTERPIECEX_INSTALLED
             MASTERPIECEX_INSTALLED = True
             
             self.report({'INFO'}, "Masterpiece X SDK is installed and ready to use")
             
-            # Force UI update
+            # Force UI update to reflect new status
             force_ui_update()
-                    
+            
             return {'FINISHED'}
+            
         except ImportError as e:
-            self.report({'ERROR'}, f"Could not import required modules: {str(e)}")
+            self.report({'ERROR'}, f"Could not import required modules: {e}")
             self.report({'INFO'}, "Please restart Blender to load the included wheel packages")
             return {'CANCELLED'}
 
 
 class MPXGEN_OT_CancelGeneration(bpy.types.Operator):
-    """Cancel the current generation process"""
+    """
+    Cancel an active generation process
+    
+    This operator stops the current generation process by updating the
+    global generation status. The polling operator will detect this change
+    and terminate its operation.
+    """
     bl_idname = "mpxgen.cancel_generation"
     bl_label = "Cancel Generation"
     bl_description = "Cancel the current model generation process"
     bl_options = {'REGISTER', 'INTERNAL'}
 
     def execute(self, context):
+        """Cancel the generation process by updating the global status"""
         global generation_status
+        
+        if not generation_status["active"]:
+            self.report({'INFO'}, "No active generation to cancel")
+            return {'CANCELLED'}
+            
+        # Update status to indicate cancellation
         generation_status["active"] = False
         generation_status["status_text"] = "Generation cancelled"
         generation_status["progress"] = 0
         generation_status["current_step"] = ""
         
-        # Force UI update
+        # Clean up any running background threads
+        for thread in generation_status["active_threads"]:
+            if thread.is_alive():
+                # Can't forcibly terminate threads in Python, but we can
+                # set a flag for them to check and exit cleanly
+                pass
+                
+        # Clear the threads list
+        generation_status["active_threads"] = []
+        
+        self.report({'INFO'}, "Generation process cancelled")
+        
+        # Force UI update to reflect cancellation
         force_ui_update()
                 
         return {'FINISHED'}
 
 
 class MPXGEN_OT_PollStatus(bpy.types.Operator):
-    """Poll the API for generation status"""
+    """
+    Modal operator that polls the API for generation status updates
+    
+    This operator runs in the background while Blender remains responsive.
+    It periodically checks the status of ongoing generation tasks and
+    updates the UI accordingly. When tasks complete or fail, it initiates
+    the appropriate next steps.
+    """
     bl_idname = "mpxgen.poll_status"
     bl_label = "Poll Generation Status"
     bl_description = "Check the status of the current generation process"
@@ -139,6 +197,12 @@ class MPXGEN_OT_PollStatus(bpy.types.Operator):
     _last_expand_time = 0
     
     def modal(self, context, event):
+        """
+        Modal function called on every timer event
+        
+        This checks the generation status, updates the UI, and determines
+        when to move to the next step or terminate.
+        """
         global generation_status
         
         # Check if we're still actively generating
@@ -146,281 +210,274 @@ class MPXGEN_OT_PollStatus(bpy.types.Operator):
             self.cancel(context)
             return {'CANCELLED'}
             
-        # Execute only when timer triggers
+        # Handle timer events
         if event.type == 'TIMER':
-            current_time = time.time()
-            
-            # Force UI update on every timer tick
+            # Ensure UI is updated on every tick
             force_ui_update()
             
-            try:
-                # Only poll every 3 seconds to avoid hammering the API
-                if current_time - generation_status["last_poll_time"] >= 3:
-                    generation_status["last_poll_time"] = current_time
-                    elapsed_time = int(current_time - generation_status["start_time"])
-                    minutes = elapsed_time // 60
-                    seconds = elapsed_time % 60
-                    time_str = f"{minutes}m {seconds}s"
-                    
-                    # Update status text with elapsed time
-                    generation_status["status_text"] = f"Generating... ({time_str})"
-                    
-                    client = generation_status["client"]
-                    
-                    # Check if we're in the image generation phase
-                    if generation_status["current_step"] == "image" and generation_status["image_request_id"]:
-                        try:
-                            status_response = client.status.retrieve(generation_status["image_request_id"])
-                            
-                            if status_response.status == "complete":
-                                generation_status["progress"] = 35
-                                generation_status["status_text"] = "Image generated successfully!"
-                                generation_status["current_step"] = "process_image"
-                                
-                                # Force UI update before starting next step
-                                force_ui_update()
-                                
-                                # Process the generated image - separate operator will handle this
-                                bpy.ops.mpxgen.process_image()
-                                
-                            elif status_response.status == "failed":
-                                generation_status["error"] = "Image generation failed"
-                                generation_status["active"] = False
-                                self.report({'ERROR'}, "Image generation failed")
-                                self.cancel(context)
-                                return {'CANCELLED'}
-                                
-                        except Exception as e:
-                            generation_status["error"] = f"Error checking image status: {str(e)}"
-                            self.report({'ERROR'}, generation_status["error"])
-                            generation_status["active"] = False
-                            self.cancel(context)
-                            return {'CANCELLED'}
-                    
-                    # Check if we're in the 3D model generation phase
-                    elif generation_status["current_step"] == "model" and generation_status["model_request_id"]:
-                        try:
-                            status_response = client.status.retrieve(generation_status["model_request_id"])
-                            
-                            if status_response.status == "complete":
-                                generation_status["progress"] = 80
-                                generation_status["status_text"] = "3D model generated successfully!"
-                                generation_status["current_step"] = "download_model"
-                                
-                                # Force UI update before starting next step
-                                force_ui_update()
-                                
-                                # Has GLB output
-                                if hasattr(status_response, 'outputs') and hasattr(status_response.outputs, 'glb') and status_response.outputs.glb:
-                                    generation_status["model_url"] = status_response.outputs.glb
-                                    
-                                    # Download and import model - separate operator will handle this
-                                    bpy.ops.mpxgen.download_model()
-                                else:
-                                    generation_status["error"] = "No GLB model was generated"
-                                    generation_status["active"] = False
-                                    self.report({'ERROR'}, "No GLB model was generated")
-                                    self.cancel(context)
-                                    return {'CANCELLED'}
-                                
-                            elif status_response.status == "failed":
-                                generation_status["error"] = "3D model generation failed"
-                                generation_status["active"] = False
-                                self.report({'ERROR'}, "3D model generation failed")
-                                self.cancel(context)
-                                return {'CANCELLED'}
-                                
-                        except Exception as e:
-                            generation_status["error"] = f"Error checking model status: {str(e)}"
-                            self.report({'ERROR'}, generation_status["error"])
-                            generation_status["active"] = False
-                            self.cancel(context)
-                            return {'CANCELLED'}
+            current_time = time.time()
+            
+            # Only poll API every few seconds to avoid rate limits
+            if current_time - generation_status["last_poll_time"] >= 3:
+                generation_status["last_poll_time"] = current_time
                 
-            except Exception as e:
-                generation_status["error"] = f"Error in polling: {str(e)}"
-                self.report({'ERROR'}, generation_status["error"])
-                generation_status["active"] = False
-                self.cancel(context)
-                return {'CANCELLED'}
+                # Update status text with elapsed time
+                elapsed_time = int(current_time - generation_status["start_time"])
+                minutes = elapsed_time // 60
+                seconds = elapsed_time % 60
+                time_str = f"{minutes}m {seconds}s"
+                generation_status["status_text"] = f"Generating... ({time_str})"
+                
+                # Process according to current step
+                try:
+                    client = generation_status["client"]
+                    current_step = generation_status["current_step"]
+                    
+                    if current_step == "image" and generation_status["image_request_id"]:
+                        self._check_image_status(client)
+                    elif current_step == "model" and generation_status["model_request_id"]:
+                        self._check_model_status(client)
+                except Exception as e:
+                    self._handle_error(f"Error in polling: {e}")
+                    return {'CANCELLED'}
         
         return {'PASS_THROUGH'}
     
+    def _check_image_status(self, client):
+        """Check status of the text-to-image generation"""
+        try:
+            status_response = client.status.retrieve(generation_status["image_request_id"])
+            
+            if status_response.status == "complete":
+                generation_status["progress"] = 35
+                generation_status["status_text"] = "Image generated successfully!"
+                generation_status["current_step"] = "process_image"
+                
+                # Move to processing the image
+                bpy.ops.mpxgen.process_image()
+                
+            elif status_response.status == "failed":
+                self._handle_error("Image generation failed")
+                
+        except Exception as e:
+            self._handle_error(f"Error checking image status: {e}")
+    
+    def _check_model_status(self, client):
+        """Check status of the image-to-3D generation"""
+        try:
+            status_response = client.status.retrieve(generation_status["model_request_id"])
+            
+            if status_response.status == "complete":
+                generation_status["progress"] = 80
+                generation_status["status_text"] = "3D model generated successfully!"
+                generation_status["current_step"] = "download_model"
+                
+                # Check if there's a model to download
+                if (hasattr(status_response, 'outputs') and 
+                    hasattr(status_response.outputs, 'glb') and 
+                    status_response.outputs.glb):
+                    
+                    generation_status["model_url"] = status_response.outputs.glb
+                    bpy.ops.mpxgen.download_model()
+                else:
+                    self._handle_error("No GLB model was generated")
+                
+            elif status_response.status == "failed":
+                self._handle_error("3D model generation failed")
+                
+        except Exception as e:
+            self._handle_error(f"Error checking model status: {e}")
+    
+    def _handle_error(self, error_msg):
+        """Handle errors during polling"""
+        generation_status["error"] = error_msg
+        generation_status["active"] = False
+        self.report({'ERROR'}, error_msg)
+        self.cancel(bpy.context)
+    
     def execute(self, context):
+        """Start the modal timer and register with window manager"""
         wm = context.window_manager
-        # Start the timer, runs every 0.5 seconds
+        # Start timer for periodic checks
         self._timer = wm.event_timer_add(0.5, window=context.window)
         wm.modal_handler_add(self)
         
-        # Initialize last expand time
+        # Initialize expand time tracking
         self._last_expand_time = 0
         
-        # Force UI update
+        # Ensure UI is updated immediately
         force_ui_update()
                     
         return {'RUNNING_MODAL'}
     
     def cancel(self, context):
+        """Stop the timer and clean up"""
+        # Remove the timer
         wm = context.window_manager
         if self._timer:
             wm.event_timer_remove(self._timer)
             self._timer = None
         
-        # Force UI update
+        # Update UI one last time
         force_ui_update()
                 
         return {'CANCELLED'}
 
 
 class MPXGEN_OT_ProcessImage(bpy.types.Operator):
-    """Process the generated image and start 3D model generation"""
+    """
+    Process the generated image and start 3D model generation
+    
+    This operator is called automatically when the text-to-image generation
+    is complete. It downloads the generated image, uploads it to the API,
+    and initiates the 3D model generation process.
+    """
     bl_idname = "mpxgen.process_image"
     bl_label = "Process Generated Image"
     bl_description = "Process the generated image and initiate 3D model generation"
     bl_options = {'REGISTER', 'INTERNAL'}
     
     def execute(self, context):
+        """Process the generated image and start 3D model generation"""
         global generation_status
+        
+        try:
+            # Verify we have an image request ID
+            if not generation_status["image_request_id"]:
+                self._handle_error("No image request ID available")
+                return {'CANCELLED'}
+                
+            client = generation_status["client"]
+            
+            # Get the generated image details
+            status_response = client.status.retrieve(generation_status["image_request_id"])
+            
+            # Check if image generation was successful
+            if not (hasattr(status_response, 'outputs') and 
+                    hasattr(status_response.outputs, 'images') and 
+                    status_response.outputs.images):
+                self._handle_error("No images were generated")
+                return {'CANCELLED'}
+                
+            # Get the image URL
+            image_url = status_response.outputs.images[0]
+            generation_status["image_url"] = image_url
+            
+            # Download the image
+            self._download_image(image_url)
+            
+            # Create and upload the asset
+            self._upload_image_as_asset(context)
+            
+            # Generate 3D model from image
+            self._start_model_generation(context)
+            
+            # Update UI
+            force_ui_update()
+            return {'FINISHED'}
+            
+        except Exception as e:
+            self._handle_error(f"Error in processing image: {e}")
+            return {'CANCELLED'}
+    
+    def _download_image(self, image_url):
+        """Download the generated image"""
+        generation_status["status_text"] = "Downloading generated image..."
+        generation_status["progress"] = 40
+        force_ui_update()
+        
+        try:
+            response = requests.get(image_url, timeout=30)
+            response.raise_for_status()
+            
+            # Save image to temporary file
+            tmp_dir = tempfile.gettempdir()
+            image_path = os.path.join(tmp_dir, "mpx_generated_image.png")
+            with open(image_path, "wb") as f:
+                f.write(response.content)
+            
+            generation_status["image_path"] = image_path
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to download image: {e}")
+    
+    def _upload_image_as_asset(self, context):
+        """Create an asset and upload the image"""
+        generation_status["status_text"] = "Uploading image for 3D conversion..."
+        generation_status["progress"] = 50
+        force_ui_update()
+        
+        try:
+            client = generation_status["client"]
+            image_path = generation_status["image_path"]
+            
+            # Get API key from preferences
+            preferences = context.preferences.addons[__package__].preferences
+            api_key = preferences.api_key
+            
+            # Create asset
+            asset_response = client.assets.create(
+                description="Generated image from Blender",
+                name="blender_gen_image.png",
+                type="image/png",
+            )
+            
+            if not (hasattr(asset_response, 'asset_url') and 
+                    hasattr(asset_response, 'request_id')):
+                raise RuntimeError("Invalid asset response from API")
+                
+            generation_status["asset_request_id"] = asset_response.request_id
+            
+            # Upload the image
+            headers = {
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type': 'image/png',
+            }
+            
+            with open(image_path, 'rb') as image_file:
+                upload_response = requests.put(
+                    asset_response.asset_url, 
+                    data=image_file.read(), 
+                    headers=headers,
+                    timeout=60
+                )
+            
+            if upload_response.status_code != 200:
+                raise RuntimeError(f"Failed to upload image: {upload_response.text}")
+                
+        except Exception as e:
+            raise RuntimeError(f"Failed to upload image as asset: {e}")
+    
+    def _start_model_generation(self, context):
+        """Initiate 3D model generation from the uploaded image"""
+        generation_status["status_text"] = "Starting 3D model generation..."
+        generation_status["progress"] = 60
+        force_ui_update()
         
         try:
             client = generation_status["client"]
             
-            # Handle the image output
-            if generation_status["image_request_id"]:
-                status_response = client.status.retrieve(generation_status["image_request_id"])
-                
-                if hasattr(status_response, 'outputs') and hasattr(status_response.outputs, 'images') and status_response.outputs.images:
-                    image_url = status_response.outputs.images[0]
-                    generation_status["image_url"] = image_url
-                    
-                    # Download the image
-                    generation_status["status_text"] = "Downloading generated image..."
-                    generation_status["progress"] = 40
-                    
-                    # Force UI update
-                    force_ui_update()
-                    
-                    try:
-                        response = requests.get(image_url, timeout=30)
-                        response.raise_for_status()
-                        image_data = response.content
-                        
-                        # Save to temporary file
-                        tmp_dir = tempfile.gettempdir()
-                        image_path = os.path.join(tmp_dir, "mpx_generated_image.png")
-                        with open(image_path, "wb") as f:
-                            f.write(image_data)
-                        
-                        generation_status["image_path"] = image_path
-                        
-                        # Create an asset and upload the image
-                        generation_status["status_text"] = "Uploading image for 3D conversion..."
-                        generation_status["progress"] = 50
-                        
-                        # Force UI update
-                        force_ui_update()
-                        
-                        # Get API key from addon preferences
-                        preferences = context.preferences.addons[__package__].preferences
-                        api_key = preferences.api_key
-                        
-                        asset_response = client.assets.create(
-                            description="Generated image from Blender",
-                            name="blender_gen_image.png",
-                            type="image/png",
-                        )
-                        
-                        if hasattr(asset_response, 'asset_url') and hasattr(asset_response, 'request_id'):
-                            generation_status["asset_request_id"] = asset_response.request_id
-                            
-                            # Upload the image
-                            headers = {
-                                'Authorization': f'Bearer {api_key}',
-                                'Content-Type': 'image/png',
-                            }
-                            
-                            with open(image_path, 'rb') as image_file:
-                                upload_response = requests.put(
-                                    asset_response.asset_url, 
-                                    data=image_file.read(), 
-                                    headers=headers,
-                                    timeout=60
-                                )
-                            
-                            if upload_response.status_code == 200:
-                                # Generate 3D model from image
-                                generation_status["status_text"] = "Starting 3D model generation..."
-                                generation_status["progress"] = 60
-                                
-                                # Force UI update
-                                force_ui_update()
-                                
-                                # Get parameters from scene properties
-                                imageto3d_request = client.functions.imageto3d(
-                                    image_request_id=asset_response.request_id,
-                                    seed=context.scene.mpx_seed,
-                                    texture_size=context.scene.mpx_texture_size
-                                )
-                                
-                                generation_status["model_request_id"] = imageto3d_request.request_id
-                                generation_status["current_step"] = "model"
-                                generation_status["status_text"] = "Generating 3D model..."
-                                
-                                # Force UI update
-                                force_ui_update()
-                                
-                            else:
-                                generation_status["error"] = f"Failed to upload image: {upload_response.text}"
-                                generation_status["active"] = False
-                                self.report({'ERROR'}, generation_status["error"])
-                                
-                                # Force UI update
-                                force_ui_update()
-                                            
-                                return {'CANCELLED'}
-                        else:
-                            generation_status["error"] = "Invalid asset response from API"
-                            generation_status["active"] = False
-                            self.report({'ERROR'}, generation_status["error"])
-                            
-                            # Force UI update
-                            force_ui_update()
-                                        
-                            return {'CANCELLED'}
-                        
-                    except Exception as e:
-                        generation_status["error"] = f"Error processing image: {str(e)}"
-                        generation_status["active"] = False
-                        self.report({'ERROR'}, generation_status["error"])
-                        
-                        # Force UI update
-                        force_ui_update()
-                                    
-                        return {'CANCELLED'}
-                else:
-                    generation_status["error"] = "No images were generated"
-                    generation_status["active"] = False
-                    self.report({'ERROR'}, generation_status["error"])
-                    
-                    # Force UI update
-                    force_ui_update()
-                                
-                    return {'CANCELLED'}
+            # Initiate 3D model generation
+            imageto3d_request = client.functions.imageto3d(
+                image_request_id=generation_status["asset_request_id"],
+                seed=context.scene.mpx_seed,
+                texture_size=context.scene.mpx_texture_size
+            )
             
-            # Force UI update
-            force_ui_update()
-                    
-            return {'FINISHED'}
+            # Update status
+            generation_status["model_request_id"] = imageto3d_request.request_id
+            generation_status["current_step"] = "model"
+            generation_status["status_text"] = "Generating 3D model..."
             
         except Exception as e:
-            generation_status["error"] = f"Error in processing image: {str(e)}"
-            generation_status["active"] = False
-            self.report({'ERROR'}, generation_status["error"])
-            
-            # Force UI update
-            force_ui_update()
-                        
-            return {'CANCELLED'}
+            raise RuntimeError(f"Failed to start 3D model generation: {e}")
+    
+    def _handle_error(self, error_msg):
+        """Handle errors during image processing"""
+        generation_status["error"] = error_msg
+        generation_status["active"] = False
+        self.report({'ERROR'}, error_msg)
+        force_ui_update()
 
 
 class MPXGEN_OT_DownloadModel(bpy.types.Operator):
@@ -431,6 +488,11 @@ class MPXGEN_OT_DownloadModel(bpy.types.Operator):
     bl_options = {'REGISTER', 'INTERNAL'}
     
     _timer = None
+    _thread = None
+    _download_completed = False
+    _model_downloaded = False
+    _download_error = None
+    _glb_path = None
     
     def execute(self, context):
         global generation_status
@@ -443,64 +505,28 @@ class MPXGEN_OT_DownloadModel(bpy.types.Operator):
                 # Force UI update
                 force_ui_update()
                 
-                # Download the model
-                try:
-                    model_response = requests.get(generation_status["model_url"], timeout=60)
-                    model_response.raise_for_status()
-                    
-                    # Save to temporary file
-                    tmp_dir = tempfile.gettempdir()
-                    glb_path = os.path.join(tmp_dir, "mpx_generated_model.glb")
-                    with open(glb_path, "wb") as model_file:
-                        model_file.write(model_response.content)
-                    
-                    generation_status["model_path"] = glb_path
-                    
-                    # Import the model
-                    generation_status["status_text"] = "Importing 3D model..."
-                    generation_status["progress"] = 90
-                    
-                    # Force UI update
-                    force_ui_update()
-                    
-                    # Check if GLTF importer is available
-                    if hasattr(bpy.ops.import_scene, 'gltf'):
-                        bpy.ops.import_scene.gltf(filepath=glb_path)
-                        
-                        generation_status["status_text"] = "Model imported successfully!"
-                        generation_status["progress"] = 100
-                        
-                        # Force UI update
-                        force_ui_update()
-                        
-                        # Reset status after a short delay instead of using a timer
-                        # Start a timer to reset the status
-                        wm = context.window_manager
-                        self._timer = wm.event_timer_add(3.0, window=context.window)
-                        wm.modal_handler_add(self)
-                        
-                        self.report({'INFO'}, "Model generated and imported successfully!")
-                        return {'RUNNING_MODAL'}
-                        
-                    else:
-                        generation_status["error"] = "GLTF importer is not available. Please enable the 'Import-Export: glTF 2.0 format' addon."
-                        generation_status["active"] = False
-                        self.report({'ERROR'}, generation_status["error"])
-                        
-                        # Force UI update
-                        force_ui_update()
-                                    
-                        return {'CANCELLED'}
-                    
-                except Exception as e:
-                    generation_status["error"] = f"Error downloading or importing model: {str(e)}"
-                    generation_status["active"] = False
-                    self.report({'ERROR'}, generation_status["error"])
-                    
-                    # Force UI update
-                    force_ui_update()
-                                
-                    return {'CANCELLED'}
+                # Set initial state for download thread
+                self._download_completed = False
+                self._model_downloaded = False
+                self._download_error = None
+                
+                # Start a background thread for downloading
+                self._thread = threading.Thread(
+                    target=self._download_model_thread,
+                    args=(generation_status["model_url"],)
+                )
+                self._thread.daemon = True  # Thread will die when Blender exits
+                self._thread.start()
+                
+                # Add to active threads list for potential cleanup
+                generation_status["active_threads"].append(self._thread)
+                
+                # Start the timer to check for completion
+                wm = context.window_manager
+                self._timer = wm.event_timer_add(0.5, window=context.window)
+                wm.modal_handler_add(self)
+                
+                return {'RUNNING_MODAL'}
             else:
                 generation_status["error"] = "No model URL available"
                 generation_status["active"] = False
@@ -511,11 +537,6 @@ class MPXGEN_OT_DownloadModel(bpy.types.Operator):
                             
                 return {'CANCELLED'}
             
-            # Force UI update
-            force_ui_update()
-                    
-            return {'FINISHED'}
-            
         except Exception as e:
             generation_status["error"] = f"Error in downloading model: {str(e)}"
             generation_status["active"] = False
@@ -525,36 +546,134 @@ class MPXGEN_OT_DownloadModel(bpy.types.Operator):
             force_ui_update()
                         
             return {'CANCELLED'}
+    
+    def _download_model_thread(self, model_url):
+        """Background thread function to download the model"""
+        try:
+            # Download the model
+            model_response = requests.get(model_url, timeout=60)
+            model_response.raise_for_status()
+            
+            # Save to temporary file
+            tmp_dir = tempfile.gettempdir()
+            glb_path = os.path.join(tmp_dir, "mpx_generated_model.glb")
+            with open(glb_path, "wb") as model_file:
+                model_file.write(model_response.content)
+            
+            # Set success flags and path for modal callback
+            self._glb_path = glb_path
+            self._model_downloaded = True
+            generation_status["model_path"] = glb_path
+            
+        except Exception as e:
+            self._download_error = str(e)
+        
+        finally:
+            # Signal completion to modal operator
+            self._download_completed = True
             
     def modal(self, context, event):
-        # This handles the timer for resetting status
+        """Handle modal events and check download status"""
         if event.type == 'TIMER':
-            # Reset status
-            global generation_status
-            generation_status["active"] = False
-            generation_status["status_text"] = ""
-            generation_status["progress"] = 0
-            generation_status["current_step"] = ""
-            
-            # Force UI update
-            force_ui_update()
-            
-            # Remove timer
-            wm = context.window_manager
-            wm.event_timer_remove(self._timer)
-            
-            return {'FINISHED'}
+            # Check if download is finished
+            if self._download_completed:
+                # Remove thread from active threads list
+                if self._thread in generation_status["active_threads"]:
+                    generation_status["active_threads"].remove(self._thread)
+                
+                # Check for error
+                if self._download_error:
+                    generation_status["error"] = f"Error downloading model: {self._download_error}"
+                    generation_status["active"] = False
+                    self.report({'ERROR'}, generation_status["error"])
+                    
+                    # Force UI update
+                    force_ui_update()
+                    
+                    # Remove timer
+                    wm = context.window_manager
+                    wm.event_timer_remove(self._timer)
+                    
+                    return {'CANCELLED'}
+                
+                # Check for success
+                elif self._model_downloaded and self._glb_path:
+                    generation_status["status_text"] = "Importing 3D model..."
+                    generation_status["progress"] = 90
+                    
+                    # Force UI update
+                    force_ui_update()
+                    
+                    # Import the model in the main thread for safety
+                    try:
+                        # Check if GLTF importer is available
+                        if hasattr(bpy.ops.import_scene, 'gltf'):
+                            bpy.ops.import_scene.gltf(filepath=self._glb_path)
+                            
+                            # Mark generation as complete and stop polling
+                            generation_status["status_text"] = "Model imported successfully!"
+                            generation_status["progress"] = 100
+                            # Set active to false immediately to stop polling
+                            generation_status["active"] = False
+                            
+                            # Force UI update
+                            force_ui_update()
+                            
+                            # Remove timer
+                            wm = context.window_manager
+                            wm.event_timer_remove(self._timer)
+                            
+                            self.report({'INFO'}, "Model generated and imported successfully!")
+                            return {'FINISHED'}
+                            
+                        else:
+                            generation_status["error"] = "GLTF importer is not available. Please enable the 'Import-Export: glTF 2.0 format' addon."
+                            generation_status["active"] = False
+                            self.report({'ERROR'}, generation_status["error"])
+                            
+                            # Force UI update
+                            force_ui_update()
+                            
+                            # Remove timer
+                            wm = context.window_manager
+                            wm.event_timer_remove(self._timer)
+                            
+                            return {'CANCELLED'}
+                    except Exception as e:
+                        generation_status["error"] = f"Error importing model: {str(e)}"
+                        generation_status["active"] = False
+                        self.report({'ERROR'}, generation_status["error"])
+                        
+                        # Force UI update
+                        force_ui_update()
+                        
+                        # Remove timer
+                        wm = context.window_manager
+                        wm.event_timer_remove(self._timer)
+                        
+                        return {'CANCELLED'}
             
         return {'PASS_THROUGH'}
 
 
 class MPXGEN_OT_GenerateModel(bpy.types.Operator):
-    """Generate a 3D model from text using Masterpiece X"""
+    """
+    Start the process of generating a 3D model from text
+    
+    This operator initiates the model generation process by:
+    1. Validating input parameters
+    2. Setting up the generation environment
+    3. Starting the text-to-image request
+    4. Launching the background polling process
+    
+    The actual generation happens asynchronously using the polling operator.
+    """
     bl_idname = "mpxgen.generate_model"
     bl_label = "Generate Model"
     bl_description = "Generate a 3D model from text prompt using Masterpiece X"
     bl_options = {'REGISTER', 'INTERNAL'}
 
+    # Input parameters
     prompt: StringProperty(
         name="Prompt",
         description="Text prompt to generate the 3D model",
@@ -586,46 +705,37 @@ class MPXGEN_OT_GenerateModel(bpy.types.Operator):
     )
 
     def execute(self, context):
+        """Set up and start the generation process"""
+        # Verify dependencies are installed
         if not MASTERPIECEX_INSTALLED:
             self.report({'ERROR'}, "Masterpiece X SDK is not available. Please restart Blender to load the packages.")
             return {'CANCELLED'}
 
-        # Get the API key from addon preferences
+        # Verify API key is set
         preferences = context.preferences.addons[__package__].preferences
         api_key = preferences.api_key
-
         if not api_key:
             self.report({'ERROR'}, "Please enter your Masterpiece X API key in the addon preferences")
             return {'CANCELLED'}
 
+        # Verify prompt is not empty
         if not self.prompt:
             self.report({'ERROR'}, "Please enter a prompt to generate a model")
             return {'CANCELLED'}
             
-        # Check if a generation is already in progress
+        # Check if generation is already in progress
         global generation_status
         if generation_status["active"]:
             self.report({'WARNING'}, "A generation is already in progress. Please wait or cancel it.")
             return {'CANCELLED'}
         
-        # Reset generation status
+        # Initialize generation status
+        self._reset_generation_status()
         generation_status["active"] = True
         generation_status["status_text"] = "Initializing..."
         generation_status["progress"] = 5
-        generation_status["current_step"] = ""
-        generation_status["error"] = ""
-        generation_status["client"] = None
-        generation_status["image_request_id"] = None
-        generation_status["image_url"] = None
-        generation_status["image_path"] = None
-        generation_status["model_request_id"] = None
-        generation_status["model_url"] = None
-        generation_status["model_path"] = None
-        generation_status["asset_request_id"] = None
-        generation_status["last_poll_time"] = time.time()
-        generation_status["start_time"] = time.time()
         
-        # Force UI update
+        # Force immediate UI update
         force_ui_update()
         
         try:
@@ -634,14 +744,15 @@ class MPXGEN_OT_GenerateModel(bpy.types.Operator):
             client = Masterpiecex()
             generation_status["client"] = client
             
-            # Step 1: Start text-to-image generation
+            # Start the text-to-image generation
             generation_status["status_text"] = "Starting image generation..."
             generation_status["progress"] = 10
             generation_status["current_step"] = "image"
             
-            # Force UI update again with updated status
+            # Force UI update with new status
             force_ui_update()
             
+            # Initiate text-to-image generation
             text_to_image_request = client.components.text2image(
                 prompt=self.prompt,
                 num_images=1,
@@ -649,23 +760,50 @@ class MPXGEN_OT_GenerateModel(bpy.types.Operator):
                 lora_id="mpx_game"
             )
             
+            # Store request ID and update status
             generation_status["image_request_id"] = text_to_image_request.request_id
             generation_status["status_text"] = "Generating image from text..."
             generation_status["progress"] = 15
             
-            # Force UI update again
+            # Update UI and start the polling operator
             force_ui_update()
-            
-            # Start the polling operator
             bpy.ops.mpxgen.poll_status()
-                    
+            
             return {'FINISHED'}
             
         except Exception as e:
-            generation_status["active"] = False
-            generation_status["error"] = str(e)
-            self.report({'ERROR'}, f"Error initiating generation: {str(e)}")
+            # Handle initialization errors
+            self._handle_error(f"Error initiating generation: {e}")
             return {'CANCELLED'}
+    
+    def _reset_generation_status(self):
+        """Reset the global generation status dictionary"""
+        global generation_status
+        generation_status.update({
+            "active": False,
+            "status_text": "",
+            "progress": 0,
+            "current_step": "",
+            "error": "",
+            "client": None,
+            "image_request_id": None,
+            "image_url": None,
+            "image_path": None,
+            "model_request_id": None,
+            "model_url": None,
+            "model_path": None,
+            "asset_request_id": None,
+            "last_poll_time": time.time(),
+            "start_time": time.time(),
+            "active_threads": []
+        })
+    
+    def _handle_error(self, error_msg):
+        """Handle errors during generation setup"""
+        generation_status["active"] = False
+        generation_status["error"] = error_msg
+        self.report({'ERROR'}, error_msg)
+        force_ui_update()
 
 
 # Registration
@@ -697,6 +835,13 @@ def unregister():
     # Cancel any active polling operation
     global generation_status
     generation_status["active"] = False
+    
+    # Clean up any running threads
+    for thread in generation_status["active_threads"]:
+        if thread.is_alive():
+            # Can't forcibly terminate threads in Python, but we've set them as daemon
+            # so they'll terminate when Blender exits
+            pass
     
     # Make sure the timer is removed if active
     try:
