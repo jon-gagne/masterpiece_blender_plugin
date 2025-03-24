@@ -69,7 +69,6 @@ For best results when generating from images:
 ### Generation Issues
 
 - Ensure you have a valid API key entered in preferences
-- Try simpler text prompts or different images
 - For image generation, ensure your image meets the guidelines
 
 ### Uninstallation Issues
