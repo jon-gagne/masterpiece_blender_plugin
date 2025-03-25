@@ -4,46 +4,75 @@
 
 echo "Building Masterpiece X Generator extension..."
 
+# Reminder for file permissions
+if [[ ! -x "$0" ]]; then
+    echo "First-time users: This script might need executable permissions."
+    echo "Run: chmod +x $(basename $0)"
+    echo ""
+fi
+
+# Determine pip command to use
+if command -v pip3 &> /dev/null; then
+    PIP_CMD="pip3"
+elif command -v pip &> /dev/null; then
+    PIP_CMD="pip"
+else
+    echo "Error: Neither pip3 nor pip was found. Please install Python pip."
+    exit 1
+fi
+echo "Using pip command: $PIP_CMD"
+
 # Check for and remove previous build outputs
 if [ -f "masterpiece_x_generator-1.0.0.zip" ]; then
-    rm -f masterpiece_x_generator-1.0.0.zip
+    rm -f "masterpiece_x_generator-1.0.0.zip"
 fi
 if [ -d "build" ]; then
-    rm -rf build
+    rm -rf "build"
 fi
 
 # Ensure wheels directory exists
 if [ ! -d "wheels" ]; then
-    mkdir wheels
+    mkdir "wheels"
 fi
 
-# Detect platform for wheel downloads
-if [[ "$OSTYPE" == "darwin"* ]]; then
+# Detect platform for wheel downloads (improved with multiple checks)
+if [[ "$OSTYPE" == "darwin"* ]] || [[ "$(uname)" == "Darwin" ]]; then
     # macOS - platform macosx
     PLATFORM="macosx_10_9_x86_64"
     PLATFORM_SHORT="macosx"
     
     # For Apple Silicon Macs, also get arm64 packages
-    if [[ $(uname -m) == "arm64" ]]; then
+    if [[ "$(uname -m)" == "arm64" ]] || [[ "$(uname -p)" == "arm" ]]; then
         PLATFORM="macosx_11_0_arm64"
         PLATFORM_SHORT="macosx"
+        echo "Detected Apple Silicon Mac (ARM64)"
+    else
+        echo "Detected Intel Mac (x86_64)"
     fi
 else
     # Linux - platform manylinux
     PLATFORM="manylinux_2_17_x86_64"
     PLATFORM_SHORT="manylinux"
+    echo "Detected Linux (x86_64)"
+    
+    # Check for ARM Linux
+    if [[ "$(uname -m)" == "aarch64" ]]; then
+        PLATFORM="manylinux_2_17_aarch64"
+        PLATFORM_SHORT="manylinux"
+        echo "Detected Linux (ARM64)"
+    fi
 fi
 
-# Check if we already have wheels for this platform
+# More robust wheel detection using find
 NEED_WHEELS=0
-if ! ls wheels/*$PLATFORM_SHORT*.whl 1> /dev/null 2>&1; then
+if [ $(find wheels -name "*${PLATFORM_SHORT}*.whl" 2>/dev/null | wc -l) -eq 0 ]; then
     NEED_WHEELS=1
     echo "No $PLATFORM_SHORT wheels found. Need to download."
 else
-    # Check for essential packages
-    if ! ls wheels/*mpx_genai_sdk*.whl 1> /dev/null 2>&1; then NEED_WHEELS=1; fi
-    if ! ls wheels/*requests*.whl 1> /dev/null 2>&1; then NEED_WHEELS=1; fi
-    if ! ls wheels/*pydantic_core*$PLATFORM_SHORT*.whl 1> /dev/null 2>&1; then NEED_WHEELS=1; fi
+    # Check for essential packages with more robust pattern matching
+    if [ $(find wheels -name "*mpx_genai_sdk*.whl" 2>/dev/null | wc -l) -eq 0 ]; then NEED_WHEELS=1; fi
+    if [ $(find wheels -name "*requests*.whl" 2>/dev/null | wc -l) -eq 0 ]; then NEED_WHEELS=1; fi
+    if [ $(find wheels -name "*pydantic_core*${PLATFORM_SHORT}*.whl" 2>/dev/null | wc -l) -eq 0 ]; then NEED_WHEELS=1; fi
     
     if [ $NEED_WHEELS -eq 1 ]; then
         echo "Some essential wheels are missing. Need to download."
@@ -55,9 +84,9 @@ fi
 # Download required wheel packages if needed
 if [ $NEED_WHEELS -eq 1 ]; then
     echo "Downloading required wheel packages for Python 3.11 ($PLATFORM_SHORT)..."
-    pip3 download --only-binary=:all: \
+    "$PIP_CMD" download --only-binary=:all: \
         --python-version 3.11 \
-        --platform $PLATFORM \
+        --platform "$PLATFORM" \
         --implementation cp \
         -d wheels \
         mpx_genai_sdk \
@@ -94,9 +123,9 @@ else
     echo "BLENDER_PATH environment variable not set."
     echo "Trying default Blender installations..."
     
-    # Detect operating system
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        # macOS paths
+    # Detect operating system with improved checks
+    if [[ "$OSTYPE" == "darwin"* ]] || [[ "$(uname)" == "Darwin" ]]; then
+        # macOS paths (properly quoted for spaces in path)
         if [ -f "/Applications/Blender 4.4.app/Contents/MacOS/Blender" ]; then
             export BLENDER_PATH="/Applications/Blender 4.4.app/Contents/MacOS/Blender"
             echo "Found Blender 4.4"
@@ -154,7 +183,11 @@ else
         echo "No Blender installation found in default locations."
         echo "Please set the BLENDER_PATH environment variable to your Blender executable:"
         echo ""
-        echo "    export BLENDER_PATH=\"/path/to/your/blender\""
+        if [[ "$OSTYPE" == "darwin"* ]] || [[ "$(uname)" == "Darwin" ]]; then
+            echo "    export BLENDER_PATH=\"/Applications/Blender.app/Contents/MacOS/Blender\""
+        else
+            echo "    export BLENDER_PATH=\"/path/to/your/blender\""
+        fi
         echo ""
         echo "Then run this script again."
         exit 1
@@ -162,7 +195,7 @@ else
 fi
 
 # Build the extension using Blender's extension build command
-echo "Running Blender extension build command with: $BLENDER_PATH"
+echo "Running Blender extension build command with: \"$BLENDER_PATH\""
 "$BLENDER_PATH" --command extension build
 
 if [ -f "masterpiece_x_generator-1.0.0.zip" ]; then
