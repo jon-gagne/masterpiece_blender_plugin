@@ -17,6 +17,75 @@ if [ ! -d "wheels" ]; then
     mkdir wheels
 fi
 
+# Detect platform for wheel downloads
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS - platform macosx
+    PLATFORM="macosx_10_9_x86_64"
+    PLATFORM_SHORT="macosx"
+    
+    # For Apple Silicon Macs, also get arm64 packages
+    if [[ $(uname -m) == "arm64" ]]; then
+        PLATFORM="macosx_11_0_arm64"
+        PLATFORM_SHORT="macosx"
+    fi
+else
+    # Linux - platform manylinux
+    PLATFORM="manylinux_2_17_x86_64"
+    PLATFORM_SHORT="manylinux"
+fi
+
+# Check if we already have wheels for this platform
+NEED_WHEELS=0
+if ! ls wheels/*$PLATFORM_SHORT*.whl 1> /dev/null 2>&1; then
+    NEED_WHEELS=1
+    echo "No $PLATFORM_SHORT wheels found. Need to download."
+else
+    # Check for essential packages
+    if ! ls wheels/*mpx_genai_sdk*.whl 1> /dev/null 2>&1; then NEED_WHEELS=1; fi
+    if ! ls wheels/*requests*.whl 1> /dev/null 2>&1; then NEED_WHEELS=1; fi
+    if ! ls wheels/*pydantic_core*$PLATFORM_SHORT*.whl 1> /dev/null 2>&1; then NEED_WHEELS=1; fi
+    
+    if [ $NEED_WHEELS -eq 1 ]; then
+        echo "Some essential wheels are missing. Need to download."
+    else
+        echo "$PLATFORM_SHORT wheels already exist. Skipping download."
+    fi
+fi
+
+# Download required wheel packages if needed
+if [ $NEED_WHEELS -eq 1 ]; then
+    echo "Downloading required wheel packages for Python 3.11 ($PLATFORM_SHORT)..."
+    pip3 download --only-binary=:all: \
+        --python-version 3.11 \
+        --platform $PLATFORM \
+        --implementation cp \
+        -d wheels \
+        mpx_genai_sdk \
+        requests \
+        anyio \
+        certifi \
+        charset_normalizer \
+        distro \
+        h11 \
+        httpcore \
+        httpx \
+        idna \
+        pydantic \
+        pydantic_core \
+        sniffio \
+        typing_extensions \
+        urllib3 \
+        annotated_types
+
+    # Check if download was successful
+    if [ $? -ne 0 ]; then
+        echo "Failed to download wheel packages. Check your internet connection."
+        echo "The build process will continue, but the extension may not work correctly."
+    else
+        echo "Successfully downloaded wheel packages."
+    fi
+fi
+
 # Check if user has set BLENDER_PATH environment variable
 echo "Checking for Blender installation..."
 if [ -n "$BLENDER_PATH" ]; then

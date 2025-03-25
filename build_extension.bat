@@ -12,6 +12,58 @@ if exist build rmdir /s /q build
 REM Ensure wheels directory exists
 if not exist wheels mkdir wheels
 
+REM Check if we already have Windows wheels
+set NEED_WHEELS=0
+if not exist "wheels\*win_amd64*.whl" (
+    set NEED_WHEELS=1
+    echo No Windows wheels found. Need to download.
+) else (
+    REM Check for essential packages
+    if not exist "wheels\*mpx_genai_sdk*.whl" set NEED_WHEELS=1
+    if not exist "wheels\*requests*.whl" set NEED_WHEELS=1
+    if not exist "wheels\*pydantic_core*win_amd64*.whl" set NEED_WHEELS=1
+    
+    if %NEED_WHEELS%==1 (
+        echo Some essential wheels are missing. Need to download.
+    ) else (
+        echo Windows wheels already exist. Skipping download.
+    )
+)
+
+REM Download required wheel packages for Python 3.11 if needed
+if %NEED_WHEELS%==1 (
+    echo Downloading required wheel packages for Python 3.11...
+    pip download --only-binary=:all: ^
+        --python-version 3.11 ^
+        --platform win_amd64 ^
+        --implementation cp ^
+        -d wheels ^
+        mpx_genai_sdk ^
+        requests ^
+        anyio ^
+        certifi ^
+        charset_normalizer ^
+        distro ^
+        h11 ^
+        httpcore ^
+        httpx ^
+        idna ^
+        pydantic ^
+        pydantic_core ^
+        sniffio ^
+        typing_extensions ^
+        urllib3 ^
+        annotated_types
+
+    REM Check if download was successful
+    if errorlevel 1 (
+        echo Failed to download wheel packages. Check your internet connection.
+        echo The build process will continue, but the extension may not work correctly.
+    ) else (
+        echo Successfully downloaded wheel packages.
+    )
+)
+
 REM Check if user has set BLENDER_PATH environment variable
 echo Checking for Blender installation...
 if defined BLENDER_PATH (
