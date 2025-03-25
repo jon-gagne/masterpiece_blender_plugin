@@ -111,6 +111,10 @@ class MPXGEN_PT_MainPanel(Panel):
     
     def _draw_text_generation_form(self, layout, context):
         """Draw UI for text-based generation"""
+        # Check for account status messages first
+        if context.scene.mpx_account_status:
+            self._draw_account_status(layout, context)
+        
         # Prompt input
         layout.label(text="Enter prompt for generation:")
         row = layout.row()
@@ -136,6 +140,10 @@ class MPXGEN_PT_MainPanel(Panel):
 
     def _draw_image_generation_form(self, layout, context):
         """Draw UI for image-based generation"""
+        # Check for account status messages first
+        if context.scene.mpx_account_status:
+            self._draw_account_status(layout, context)
+            
         # Image selection
         box = layout.box()
         box.label(text="Image Source", icon='IMAGE_DATA')
@@ -175,10 +183,16 @@ class MPXGEN_PT_MainPanel(Panel):
         col = info_box.column()
         col.scale_y = 0.7
         col.label(text="• Object should be centered in view")
-        col.label(text="• Use diffuse lighting with minimal shadows")
-        col.label(text="• Solid blank background is recommended")
-        col.label(text="• Filenames should only use letters, numbers, and underscores")
-        col.label(text="• Supported formats: PNG, JPG, JPEG, BMP, WEBP")
+        
+        # Split long guidelines into multiple shorter lines
+        col.label(text="• Diffuse lighting w/ minimal shadows")        
+        col.label(text="• Solid blank background")        
+        col.label(text="• Formats: PNG, JPG, JPEG,")
+        col.label(text="  BMP, WEBP")
+        
+        # Add a button to show detailed guidelines
+        row = info_box.row()
+        row.operator("mpxgen.show_guidelines", text="Show Detailed Guidelines", icon='QUESTION')
         
         # Generation settings
         box = layout.box()
@@ -202,6 +216,49 @@ class MPXGEN_PT_MainPanel(Panel):
         else:
             row.enabled = False
             row.operator("mpxgen.generate_model", text="Select an Image First", icon='MESH_MONKEY')
+
+    def _draw_account_status(self, layout, context):
+        """Draw UI for account status messages"""
+        box = layout.box()
+        box.alert = True
+        
+        # Header row with icon and title
+        row = box.row()
+        row.alert = True
+        row.label(text="Account Alert", icon='ERROR')
+        
+        # Split the message across multiple lines if needed
+        msg = context.scene.mpx_account_status
+        if len(msg) > 30:  # If message is long
+            words = msg.split()
+            lines = []
+            current_line = ""
+            
+            # Create lines with reasonable length
+            for word in words:
+                if len(current_line) + len(word) + 1 <= 30:  # +1 for space
+                    current_line += (" " + word if current_line else word)
+                else:
+                    lines.append(current_line)
+                    current_line = word
+            
+            # Add the last line
+            if current_line:
+                lines.append(current_line)
+                
+            # Display each line
+            for line in lines:
+                box.label(text=line)
+        else:
+            # Short message, just display it
+            box.label(text=msg)
+        
+        # Action buttons
+        row = box.row()
+        row.operator("wm.url_open", text="Visit Masterpiece X", icon='URL').url = "https://developers.masterpiecex.com/"
+        row.operator("mpxgen.clear_account_status", text="Dismiss", icon='X')
+        
+        layout.separator()
 
 
 class MPXGEN_OT_SelectImage(bpy.types.Operator):
@@ -259,11 +316,84 @@ class MPXGEN_OT_ClearImage(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class MPXGEN_OT_ClearAccountStatus(bpy.types.Operator):
+    """Clear the account status message"""
+    bl_idname = "mpxgen.clear_account_status"
+    bl_label = "Clear Account Status"
+    bl_description = "Clear the account status message"
+    bl_options = {'REGISTER', 'INTERNAL'}
+    
+    def execute(self, context):
+        # Clear the account status message
+        context.scene.mpx_account_status = ""
+        return {'FINISHED'}
+
+
+class MPXGEN_OT_ShowGuidelines(bpy.types.Operator):
+    """Show detailed image submission guidelines"""
+    bl_idname = "mpxgen.show_guidelines"
+    bl_label = "Image Guidelines"
+    bl_description = "Show full image submission guidelines"
+    bl_options = {'REGISTER', 'INTERNAL'}
+    
+    def execute(self, context):
+        return {'FINISHED'}
+    
+    def invoke(self, context, event):
+        return context.window_manager.invoke_popup(self, width=400)
+    
+    def draw(self, context):
+        layout = self.layout
+        
+        # Title
+        layout.label(text="Image Submission Guidelines", icon='INFO')
+        layout.separator()
+        
+        # Detailed guidelines
+        col = layout.column(align=True)
+        col.label(text="For best 3D model generation results:")
+        
+        # Object positioning
+        box = layout.box()
+        box.label(text="Object Positioning:", icon='OBJECT_ORIGIN')
+        col = box.column(align=True)
+        col.label(text="• Center the object in the frame")
+        col.label(text="• Front side view to show front and sides")
+        
+        # Lighting
+        box = layout.box()
+        box.label(text="Lighting:", icon='LIGHT')
+        col = box.column(align=True)
+        col.label(text="• Use soft, diffuse lighting (avoid harsh shadows)")
+        col.label(text="• Ensure the object is evenly lit")
+        
+        # Background
+        box = layout.box()
+        box.label(text="Background:", icon='NODE_MATERIAL')
+        col = box.column(align=True)
+        col.label(text="• Use a solid color background (white preferred)")
+        col.label(text="• High contrast between object and background")
+        col.label(text="• Remove any other objects or clutter")
+        
+        # Technical requirements
+        box = layout.box()
+        box.label(text="Technical Requirements:", icon='SETTINGS')
+        col = box.column(align=True)
+        col.label(text="• File formats: PNG, JPG, JPEG, BMP, WEBP")
+        col.label(text="• Filename: use only letters, numbers, and underscores")
+        col.label(text="• Resolution: minimum 512×512 pixels recommended")
+        
+        layout.separator()
+        layout.label(text="Higher quality images produce better 3D models!")
+
+
 # Registration
 classes = (
     MPXGEN_PT_MainPanel,
     MPXGEN_OT_SelectImage,
     MPXGEN_OT_ClearImage,
+    MPXGEN_OT_ClearAccountStatus,
+    MPXGEN_OT_ShowGuidelines,
 )
 
 def register():
@@ -356,6 +486,15 @@ def _register_properties():
             subtype='PERCENTAGE',
             options={'SKIP_SAVE'}
         )
+        
+    # Property for account status messages
+    if not hasattr(bpy.types.Scene, "mpx_account_status"):
+        bpy.types.Scene.mpx_account_status = bpy.props.StringProperty(
+            name="Account Status",
+            description="Current status of the Masterpiece X account",
+            default="",
+            options={'SKIP_SAVE'}
+        )
 
 def unregister():
     """Unregister panel classes and properties"""
@@ -378,7 +517,8 @@ def _unregister_properties():
         "mpx_seed", 
         "mpx_progress",
         "mpx_generation_method",
-        "mpx_image_path"
+        "mpx_image_path",
+        "mpx_account_status"
     ]
     
     for prop in properties:

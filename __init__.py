@@ -53,7 +53,7 @@ class MasterpieceXPreferences(AddonPreferences):
         layout.label(text="Masterpiece X API Key")
         layout.prop(self, "api_key")
         layout.label(text="Get your API key from Masterpiece X website")
-        layout.operator("wm.url_open", text="Visit Masterpiece X", icon='URL').url = "https://www.masterpiecex.com/"
+        layout.operator("wm.url_open", text="Visit Masterpiece X", icon='URL').url = "https://developers.masterpiecex.com/"
 
 classes = (
     MasterpieceXPreferences,

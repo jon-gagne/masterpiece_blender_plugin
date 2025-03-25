@@ -9,19 +9,47 @@ if exist masterpiece_x_generator-1.0.0.zip del /f masterpiece_x_generator-1.0.0.
 if exist build\masterpiece_x_generator rmdir /s /q build\masterpiece_x_generator
 if exist build rmdir /s /q build
 
-REM Check if Blender exists in the standard location
-set BLENDER_PATH="C:\Program Files\Blender Foundation\Blender 4.3\blender.exe"
-if not exist %BLENDER_PATH% (
-    echo Blender not found at %BLENDER_PATH%
-    echo Please update the script with the correct path to blender.exe
-    exit /b 1
-)
-
 REM Ensure wheels directory exists
 if not exist wheels mkdir wheels
 
+REM Check if user has set BLENDER_PATH environment variable
+echo Checking for Blender installation...
+if defined BLENDER_PATH (
+    echo Found user-defined BLENDER_PATH: %BLENDER_PATH%
+) else (
+    echo BLENDER_PATH environment variable not set.
+    echo Trying default Blender installations...
+    
+    REM Try Blender 4.4
+    if exist "C:\Program Files\Blender Foundation\Blender 4.4\blender.exe" (
+        set BLENDER_PATH="C:\Program Files\Blender Foundation\Blender 4.4\blender.exe"
+        echo Found Blender 4.4
+    ) else if exist "C:\Program Files\Blender Foundation\Blender 4.3\blender.exe" (
+        set BLENDER_PATH="C:\Program Files\Blender Foundation\Blender 4.3\blender.exe"
+        echo Found Blender 4.3
+    ) else if exist "C:\Program Files\Blender Foundation\Blender 4.2\blender.exe" (
+        set BLENDER_PATH="C:\Program Files\Blender Foundation\Blender 4.2\blender.exe"
+        echo Found Blender 4.2
+    ) else if exist "C:\Program Files\Blender Foundation\Blender 4.1\blender.exe" (
+        set BLENDER_PATH="C:\Program Files\Blender Foundation\Blender 4.1\blender.exe"
+        echo Found Blender 4.1
+    ) else if exist "C:\Program Files\Blender Foundation\Blender 4.0\blender.exe" (
+        set BLENDER_PATH="C:\Program Files\Blender Foundation\Blender 4.0\blender.exe"
+        echo Found Blender 4.0
+    ) else (
+        echo No Blender installation found in default locations.
+        echo Please set the BLENDER_PATH environment variable to your Blender executable:
+        echo.
+        echo     set BLENDER_PATH="C:\Path\to\your\blender.exe"
+        echo.
+        echo Then run this script again.
+        pause
+        exit /b 1
+    )
+)
+
 REM Build the extension using Blender's extension build command
-echo Running Blender extension build command...
+echo Running Blender extension build command with: %BLENDER_PATH%
 %BLENDER_PATH% --command extension build
 
 if exist masterpiece_x_generator-1.0.0.zip (

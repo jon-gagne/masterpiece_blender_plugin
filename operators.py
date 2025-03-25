@@ -163,20 +163,15 @@ def force_ui_update():
     Force Blender to update the UI in all 3D View areas.
     
     This ensures that status changes are immediately visible to the user
-    even when Blender is busy with other operations. It tries multiple
-    approaches to ensure at least one works.
+    even when Blender is busy with other operations. Use sparingly as it
+    can cause the mouse cursor to briefly show the busy state.
     """
     # Primary method - update all View3D areas
     try:
         for window in bpy.context.window_manager.windows:
             for area in window.screen.areas:
                 if area.type == 'VIEW_3D':
-                    # Make sidebar visible
-                    for space in area.spaces:
-                        if space.type == 'VIEW_3D':
-                            space.show_region_ui = True
-                    
-                    # Redraw UI and panels
+                    # Only tag the regions for redraw, don't force immediate swap
                     for region in area.regions:
                         region.tag_redraw()
                     area.tag_redraw()
@@ -188,10 +183,20 @@ def force_ui_update():
                     area.tag_redraw()
         except Exception:
             pass
-            
-    # Force immediate redraw
+
+def lightweight_ui_update(context):
+    """
+    A more efficient UI update that only redraws the necessary panels.
+    Use this instead of force_ui_update when possible to avoid mouse cursor flickering.
+    """
+    # Only update sidebar/N-panel UI regions
     try:
-        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    for region in area.regions:
+                        if region.type == 'UI':  # Only the sidebar/N-panel
+                            region.tag_redraw()
     except Exception:
         pass
 
@@ -275,6 +280,8 @@ class MPXGEN_OT_CancelGeneration(bpy.types.Operator):
         # Clear the threads list
         generation_status["active_threads"] = []
         
+        # Don't clear account status messages on cancellation - they should remain visible
+        
         self.report({'INFO'}, "Generation process cancelled")
         
         # Force UI update to reflect cancellation
@@ -316,13 +323,15 @@ class MPXGEN_OT_PollStatus(bpy.types.Operator):
             
         # Handle timer events
         if event.type == 'TIMER':
-            # Ensure UI is updated on every tick
-            force_ui_update()
-            
             current_time = time.time()
             
             # Only poll API every few seconds to avoid rate limits
             if current_time - generation_status["last_poll_time"] >= 3:
+                # Store previous values to detect changes
+                prev_progress = generation_status["progress"]
+                prev_status = generation_status["status_text"]
+                prev_step = generation_status["current_step"]
+                
                 generation_status["last_poll_time"] = current_time
                 
                 # Update status text with elapsed time
@@ -347,6 +356,12 @@ class MPXGEN_OT_PollStatus(bpy.types.Operator):
                 except Exception as e:
                     self._handle_error(f"Error in polling: {e}")
                     return {'CANCELLED'}
+                
+                # Only update UI if something changed
+                if (prev_progress != generation_status["progress"] or 
+                    prev_status != generation_status["status_text"] or
+                    prev_step != generation_status["current_step"]):
+                    lightweight_ui_update(context)
         
         return {'PASS_THROUGH'}
     
@@ -437,8 +452,8 @@ class MPXGEN_OT_PollStatus(bpy.types.Operator):
         # Initialize expand time tracking
         self._last_expand_time = 0
         
-        # Ensure UI is updated immediately
-        force_ui_update()
+        # Ensure UI is updated immediately but use lightweight update
+        lightweight_ui_update(context)
                     
         return {'RUNNING_MODAL'}
     
@@ -496,7 +511,7 @@ class MPXGEN_OT_ProcessImage(bpy.types.Operator):
             generation_status["image_url"] = image_url
             
             # Download the image
-            self._download_image(image_url)
+            self._download_image(image_url, context)
             
             # Create and upload the asset
             self._upload_image_as_asset(context)
@@ -505,18 +520,18 @@ class MPXGEN_OT_ProcessImage(bpy.types.Operator):
             self._start_model_generation(context)
             
             # Update UI
-            force_ui_update()
+            lightweight_ui_update(context)
             return {'FINISHED'}
             
         except Exception as e:
             self._handle_error(f"Error in processing image: {e}")
             return {'CANCELLED'}
     
-    def _download_image(self, image_url):
+    def _download_image(self, image_url, context):
         """Download the generated image"""
         generation_status["status_text"] = "Downloading generated image..."
         generation_status["progress"] = 40
-        force_ui_update()
+        lightweight_ui_update(context)
         
         try:
             response = requests.get(image_url, timeout=30)
@@ -537,7 +552,7 @@ class MPXGEN_OT_ProcessImage(bpy.types.Operator):
         """Create an asset and upload the image"""
         generation_status["status_text"] = "Uploading image for 3D conversion..."
         generation_status["progress"] = 50
-        force_ui_update()
+        lightweight_ui_update(context)
         
         try:
             client = generation_status["client"]
@@ -587,7 +602,7 @@ class MPXGEN_OT_ProcessImage(bpy.types.Operator):
         """Initiate 3D model generation from the uploaded image"""
         generation_status["status_text"] = "Starting 3D model generation..."
         generation_status["progress"] = 60
-        force_ui_update()
+        lightweight_ui_update(context)
         
         try:
             client = generation_status["client"]
@@ -605,14 +620,36 @@ class MPXGEN_OT_ProcessImage(bpy.types.Operator):
             generation_status["status_text"] = "Generating 3D model..."
             
         except Exception as e:
-            raise RuntimeError(f"Failed to start 3D model generation: {e}")
+            error_msg = str(e)
+            if "Insufficient funds" in error_msg:
+                raise RuntimeError(f"Your Masterpiece X account doesn't have enough credits. Please check your account balance.")
+            else:
+                raise RuntimeError(f"Failed to start 3D model generation: {error_msg}")
     
     def _handle_error(self, error_msg):
         """Handle errors during image processing"""
+        global generation_status
         generation_status["error"] = error_msg
         generation_status["active"] = False
         self.report({'ERROR'}, error_msg)
-        force_ui_update()
+        
+        # Check for account-related errors
+        try:
+            if "Insufficient funds" in error_msg or "credits" in error_msg.lower():
+                # This is an account status issue - display it prominently in the UI
+                if hasattr(bpy.context.scene, "mpx_account_status"):
+                    bpy.context.scene.mpx_account_status = "Insufficient credits. Please check your account balance."
+        except:
+            pass
+        
+        # Use force_ui_update for errors to ensure visibility
+        try:
+            # For errors, we want immediate feedback, so use force_ui_update
+            force_ui_update()
+        except:
+            # If context is available, fallback to lightweight update
+            if hasattr(bpy, "context"):
+                lightweight_ui_update(bpy.context)
 
 
 class MPXGEN_OT_DownloadModel(bpy.types.Operator):
@@ -916,6 +953,10 @@ class MPXGEN_OT_GenerateModel(bpy.types.Operator):
         """Start text-to-image generation workflow"""
         client = generation_status["client"]
         
+        # Clear any previous account status messages
+        if hasattr(context.scene, "mpx_account_status"):
+            context.scene.mpx_account_status = ""
+        
         # Update status
         generation_status["status_text"] = "Starting image generation..."
         generation_status["progress"] = 10
@@ -949,12 +990,16 @@ class MPXGEN_OT_GenerateModel(bpy.types.Operator):
         """Start image-to-3D generation workflow"""
         client = generation_status["client"]
         
+        # Clear any previous account status messages
+        if hasattr(context.scene, "mpx_account_status"):
+            context.scene.mpx_account_status = ""
+        
         # Update status
         generation_status["status_text"] = "Preparing to upload image..."
         generation_status["progress"] = 10
         
-        # Force UI update
-        force_ui_update()
+        # Use lightweight UI update
+        lightweight_ui_update(context)
         
         try:
             # Get image filename and mime type
@@ -975,7 +1020,7 @@ class MPXGEN_OT_GenerateModel(bpy.types.Operator):
             # Create asset for image upload
             generation_status["status_text"] = "Creating asset for image upload..."
             generation_status["progress"] = 15
-            force_ui_update()
+            lightweight_ui_update(context)
             
             asset_response = client.assets.create(
                 description=f"Image uploaded from Blender: {image_filename}",
@@ -992,7 +1037,7 @@ class MPXGEN_OT_GenerateModel(bpy.types.Operator):
             # Upload the image
             generation_status["status_text"] = "Uploading image..."
             generation_status["progress"] = 25
-            force_ui_update()
+            lightweight_ui_update(context)
             
             # Get API key from preferences
             preferences = context.preferences.addons.get("bl_ext.user_default.masterpiece_x_generator")
@@ -1028,7 +1073,7 @@ class MPXGEN_OT_GenerateModel(bpy.types.Operator):
             # Start 3D model generation from the uploaded image
             generation_status["status_text"] = "Starting 3D model generation..."
             generation_status["progress"] = 40
-            force_ui_update()
+            lightweight_ui_update(context)
             
             # Use the asset request ID to generate the 3D model
             try:
@@ -1045,13 +1090,15 @@ class MPXGEN_OT_GenerateModel(bpy.types.Operator):
                 generation_status["progress"] = 45
                 
                 # Force UI update and start the polling operator
-                force_ui_update()
+                lightweight_ui_update(context)
                 bpy.ops.mpxgen.poll_status()
                 
             except Exception as e:
                 error_msg = str(e)
                 if "Invalid asset" in error_msg:
                     raise RuntimeError(f"API rejected the image: {error_msg}. Try a different image or format.")
+                elif "Insufficient funds" in error_msg:
+                    raise RuntimeError(f"Your Masterpiece X account doesn't have enough credits. Please check your account balance.")
                 else:
                     raise RuntimeError(f"Failed to start 3D model generation: {error_msg}")
             
@@ -1096,8 +1143,19 @@ class MPXGEN_OT_GenerateModel(bpy.types.Operator):
     
     def _handle_error(self, error_msg):
         """Handle errors during generation setup"""
+        global generation_status
         generation_status["active"] = False
         generation_status["error"] = error_msg
+        
+        # Check for account-related errors
+        try:
+            if "Insufficient funds" in error_msg or "credits" in error_msg.lower():
+                # This is an account status issue - display it prominently in the UI
+                if hasattr(bpy.context.scene, "mpx_account_status"):
+                    bpy.context.scene.mpx_account_status = "Insufficient credits. Please check your account balance."
+        except:
+            pass
+            
         self.report({'ERROR'}, error_msg)
         force_ui_update()
 
