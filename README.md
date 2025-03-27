@@ -56,8 +56,9 @@ For best results when generating from images:
 ## Building from Source
 
 1. Clone this repository
-2. Run `build_extension.bat` (requires Blender 4.3 installed at the default location)
-3. The built extension (`masterpiece_x_generator-1.0.0.zip`) will be created
+2. Ensure Blender 4.0 or newer is installed on either the default location of set the environment variable BLENDER_PATH. On Windows (set BLENDER_PATH="C:\Path\to\blender.exe") and on Mac/Linux (export BLENDER_PATH="/Path/to/blender.exe")
+3. Run `build_extension.bat` (on Windows) or `build_extension.sh` (on Mac/Linux). Note, you may need to run chmod +x build_extension.sh on Mac/Linux the first time.
+4. The built extension (`masterpiece_x_generator-1.0.0.zip`) will be created
 
 ## Troubleshooting
 
